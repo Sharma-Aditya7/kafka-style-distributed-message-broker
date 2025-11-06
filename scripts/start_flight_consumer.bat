@@ -6,9 +6,9 @@ echo Starting Flight Data Analytics Consumer
 echo ==========================================
 
 REM Configuration
-set CONSUMER_ID=flight-analytics-consumer
-set BROKERS=localhost:9092 localhost:9093
-set REDIS_HOST=localhost
+set CONSUMER_ID=consumer-1
+set BROKERS=172.23.51.66:9092 172.23.202.101:9093
+set REDIS_HOST=172.23.202.101
 set REDIS_PORT=6379
 
 REM Navigate to project root
