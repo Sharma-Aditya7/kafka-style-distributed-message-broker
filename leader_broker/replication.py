@@ -38,7 +38,7 @@ class ReplicationManager:
             self.socket = None
             return False
 
-    def replicate_message(self, data: Any, offset: int, message_id: str) -> bool:
+    def replicate_message(self, data, offset: int, message_id: str) -> bool:
         """
         Synchronously replicate a message to follower
         Returns True if ACK received, False otherwise
