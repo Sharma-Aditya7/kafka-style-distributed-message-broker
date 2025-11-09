@@ -6,7 +6,7 @@ echo "Starting Producer Client (Node 3)"
 echo "=========================================="
 
 # Configuration
-BROKERS="${BROKERS:-localhost:9092 localhost:9093}"
+BROKERS="${BROKERS:-172.23.159.119:9092 localhost:9093}"
 REDIS_HOST="${REDIS_HOST:-localhost}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 

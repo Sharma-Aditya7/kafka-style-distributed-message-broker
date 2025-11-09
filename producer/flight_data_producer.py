@@ -24,7 +24,7 @@ class FlightDataProducer:
         self.total_sent = 0
         self.total_failed = 0
 
-    def stream_flight_data(self, delay_ms: int = 100, max_records: int = None):
+    def stream_flight_data(self, delay_ms: int = 100, max_records: int = 200):
         """
         Stream flight data from CSV file
 

@@ -6,8 +6,8 @@ echo "Starting Flight Data Producer"
 echo "=========================================="
 
 # Configuration
-BROKERS="${BROKERS:-localhost:9092 localhost:9093}"
-REDIS_HOST="${REDIS_HOST:-localhost}"
+BROKERS="${BROKERS:-172.23.51.66:9092 172.23.159.119:9093}"
+REDIS_HOST="${REDIS_HOST:-172.23.159.119}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 CSV_FILE="${CSV_FILE:-data/FlightDelay2.csv}"
 DELAY="${DELAY:-100}"  # milliseconds between records
