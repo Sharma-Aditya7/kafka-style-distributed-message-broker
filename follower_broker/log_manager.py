@@ -67,15 +67,16 @@ class LogManager:
 
     def get_messages(self, start_offset: int, max_messages: int = 100) -> List[Dict[str, Any]]:
         """
-        Retrieve messages starting from start_offset
+        Retrieve messages starting from start_offset (by actual offset, not array index)
         Returns list of message dictionaries
         """
         with self.lock:
-            if start_offset < 0 or start_offset >= len(self.log):
-                return []
-
-            end_offset = min(start_offset + max_messages, len(self.log))
-            messages = [self.log[i].to_dict() for i in range(start_offset, end_offset)]
+            messages = []
+            count = 0
+            for entry in self.log:
+                if entry.offset >= start_offset and count < max_messages:
+                    messages.append(entry.to_dict())
+                    count += 1
             return messages
 
     def get_latest_offset(self) -> int:
@@ -91,6 +92,7 @@ class LogManager:
     def get_message_at_offset(self, offset: int) -> Optional[Dict[str, Any]]:
         """Get a specific message by offset"""
         with self.lock:
-            if 0 <= offset < len(self.log):
-                return self.log[offset].to_dict()
+            for entry in self.log:
+                if entry.offset == offset:
+                    return entry.to_dict()
             return None
