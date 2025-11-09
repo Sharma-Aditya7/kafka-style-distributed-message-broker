@@ -20,11 +20,12 @@ from common.config import Config
 class Consumer:
     """Consumer client that reads messages from the broker"""
 
-    def __init__(self, consumer_id: str, broker_addresses: list, redis_host: str, redis_port: int):
+    def __init__(self, consumer_id: str, broker_addresses: list, redis_host: str, redis_port: int, from_beginning: bool = False):
         """
         Initialize consumer
         consumer_id: unique identifier for this consumer
         broker_addresses: list of (host, port) tuples for all known brokers
+        from_beginning: if True, start from offset -1 regardless of saved offset
         """
         self.consumer_id = consumer_id
         self.broker_addresses = broker_addresses
@@ -34,8 +35,13 @@ class Consumer:
         self.socket = None
         self.current_offset = -1
 
-        # Load last committed offset
-        self.load_offset()
+        # Load last committed offset (or start from beginning if requested)
+        if from_beginning:
+            print("Starting from beginning (offset -1)")
+            self.current_offset = -1
+            self.commit_offset(-1)
+        else:
+            self.load_offset()
 
     def load_offset(self):
         """Load the last committed offset from Redis"""
@@ -225,6 +231,8 @@ class Consumer:
 
                     print(f"Processed {len(messages)} messages\n")
                 else:
+                    print("These many messages recieved")
+                    print(f"Processed {len(messages)} messages\n")
                     print("No new messages available")
 
                 if not continuous:
@@ -352,6 +360,7 @@ def main():
     parser.add_argument('--redis-port', type=int, default=Config.REDIS_PORT, help='Redis port')
     parser.add_argument('--continuous', action='store_true', help='Continuous consumption mode')
     parser.add_argument('--fetch-all', action='store_true', help='Fetch all messages and exit')
+    parser.add_argument('--from-beginning', action='store_true', help='Start consuming from offset 0 (ignores saved offset)')
 
     args = parser.parse_args()
 
@@ -366,7 +375,7 @@ def main():
             return
 
     # Create consumer
-    consumer = Consumer(args.consumer_id, broker_addresses, args.redis_host, args.redis_port)
+    consumer = Consumer(args.consumer_id, broker_addresses, args.redis_host, args.redis_port, from_beginning=args.from_beginning)
 
     try:
         if args.continuous:
