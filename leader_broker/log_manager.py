@@ -1,10 +1,10 @@
 """
 Log Manager for Broker
 Handles message storage and retrieval
+Matches Follower's log_manager
 """
 import threading
 from typing import List, Optional, Dict, Any
-
 
 class LogEntry:
     """Represents a single log entry"""
@@ -23,7 +23,6 @@ class LogEntry:
             'message_id': self.message_id,
             'timestamp': self.timestamp
         }
-
 
 class LogManager:
     """Thread-safe log manager for storing messages"""
