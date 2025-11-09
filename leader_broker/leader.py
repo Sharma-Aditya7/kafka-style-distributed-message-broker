@@ -1,6 +1,7 @@
 """
 Leader Broker Implementation
 Handles producer requests, replication, and leader lease management
+Connects to Node2's Redis
 """
 import socket
 import threading
@@ -297,7 +298,6 @@ def main():
         args.redis_port
     )
     broker.start()
-
 
 if __name__ == '__main__':
     main()
