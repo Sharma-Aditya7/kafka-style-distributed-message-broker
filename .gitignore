@@ -101,6 +101,12 @@ celerybeat-schedule
 .env
 .env.*
 
+# Local deployment config (copy of config.env.example)
+config.env
+
+# Spark job output
+output/
+
 # Spyder project settings
 .spyderproject
 .spyproject

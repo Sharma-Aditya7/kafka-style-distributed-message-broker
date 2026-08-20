@@ -6,8 +6,8 @@ echo Starting Flight Data Producer
 echo ==========================================
 
 REM Configuration
-set BROKERS=:9092 172.23.159.119:9093
-set REDIS_HOST=172.23.159.119
+set BROKERS=localhost:9092 localhost:9093
+set REDIS_HOST=localhost
 set REDIS_PORT=6379
 set CSV_FILE=data\FlightDelay2.csv
 set DELAY=100

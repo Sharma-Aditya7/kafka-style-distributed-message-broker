@@ -8,9 +8,9 @@ echo ==========================================
 REM Configuration (update these with actual IPs)
 set LEADER_HOST=0.0.0.0
 set LEADER_PORT=9092
-set FOLLOWER_HOST=172.23.159.119
+set FOLLOWER_HOST=localhost
 set FOLLOWER_PORT=9093
-set REDIS_HOST=172.23.159.119
+set REDIS_HOST=localhost
 set REDIS_PORT=6379
 
 REM Navigate to project root

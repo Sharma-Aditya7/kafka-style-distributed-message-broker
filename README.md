@@ -1,594 +1,258 @@
-# YAK - Yet Another Kafka
+# YAK — Yet Another Kafka
 
-A fault-tolerant distributed message broker built from scratch in Python for **real-time airline flight delay analytics**.
+**A fault-tolerant, Kafka-style distributed message broker implemented from scratch in
+Python.** No Kafka libraries — the wire protocol, replicated log, leader election, and
+failover-aware clients are all built directly on TCP sockets and Redis.
 
-## 🎯 Project Overview
+Kill the leader mid-stream and the system keeps going: a follower detects the failure,
+elects itself through an atomic Redis lease, and producers and consumers rediscover the
+new leader on their own. Every message that was acknowledged before the crash is still
+readable afterwards.
 
-YAK is a custom implementation of a Kafka-like message broker system that processes **18,000+ flight delay records** with:
-- **Zero Data Loss**: Synchronous replication ensures no committed message is ever lost
-- **Automatic Failover**: Leader failure detected and recovered within seconds
-- **Real-Time Analytics**: Live flight delay analysis and insights
-- **Spark Integration**: Distributed big data processing
-- **Client Intelligence**: Producers and consumers automatically discover and reconnect to the new leader
+Built by a team of four for a Big Data course, and run across four physical machines.
 
-## ✈️ Flight Data Processing
+---
 
-This system streams and analyzes **real airline flight delay data** with:
-- **18,339 flight records** from major US carriers
-- **Real-time delay analytics** (routes, airlines, time patterns)
-- **Spark-based distributed processing**
-- **Zero data loss guarantees** during broker failures
+## What it does
 
-## 📐 Architecture
+- **Multi-broker leader/follower architecture** — one leader accepts all writes, one
+  follower maintains a byte-identical replica at identical offsets.
+- **Synchronous replication** — the leader does not acknowledge a producer until the
+  follower has confirmed the write. Committed means *replicated*.
+- **High-water-mark read semantics** — consumers can only read offsets at or below the
+  HWM, so nothing un-replicated is ever visible.
+- **Leader election via atomic Redis lease** — `SET NX EX` means exactly one broker can
+  win. Split-brain is prevented structurally, not probabilistically.
+- **Failure detection** — the leader renews a 30s lease every 5s; the follower elects
+  after three consecutive missed checks. Observed failover: ~15–20 seconds.
+- **Client failover** — producers and consumers discover the leader through Redis, fall
+  back to querying brokers directly, and retry through a leader change with no
+  reconfiguration.
+- **At-least-once delivery** — offsets commit to Redis after processing; producer
+  retries carry the original UUID and are deduplicated at the broker.
+- **Streaming flight-data pipeline** — 18,338 real US flight delay records streamed one
+  message at a time, with analytics in plain Python and in Spark.
 
+---
+
+## Architecture
+
+```mermaid
+flowchart TB
+    P["Producer"] -->|"1 · PRODUCE"| L["Leader Broker :9092"]
+    L -->|"2 · REPLICATE"| F["Follower Broker :9093"]
+    F -->|"3 · ACK"| L
+    L -->|"4 · SET hwm:offset"| R[("Redis :6379")]
+    L -->|"5 · ACK (offset)"| P
+
+    C["Consumer"] -->|"FETCH"| L
+    L -->|"messages ≤ HWM"| C
+
+    F -.->|"poll leader:lease<br/>SET NX on expiry"| R
+    L -.->|"renew lease / 5s"| R
+    P -.->|"GET leader:current"| R
+    C -.->|"offsets + discovery"| R
 ```
-┌─────────────────┐         ┌─────────────────┐
-│   Node 1        │         │   Node 2        │
-│  Leader Broker  │◄───────►│ Follower Broker │
-│  (Port 9092)    │Replicate│  (Port 9093)    │
-└────────┬────────┘         └────────┬────────┘
-         │                           │
-         │                  ┌────────▼────────┐
-         │                  │  Redis Server   │
-         │                  │  (Port 6379)    │
-         │                  └─────────────────┘
-         │                           │
-    ┌────▼────┐                 ┌───▼─────┐
-    │  Node 3 │                 │ Node 4  │
-    │Producer │                 │Consumer │
-    └─────────┘                 └─────────┘
-```
 
-## 🚀 Quick Start
+Steps 1–5 are strictly ordered: the producer's ACK is the *last* thing to happen, after
+the follower already has the message. That ordering is the entire durability argument.
 
-### Prerequisites
-- Python 3.8+
-- Redis server
-- 4 networked machines (or localhost for testing)
+Redis holds only coordination state — the leader lease, the current leader address, the
+HWM, and per-consumer offsets. Message data never passes through it.
 
-### Installation
+**[→ Full architecture, protocol, and failure analysis](docs/ARCHITECTURE.md)**
+
+---
+
+## Guarantees
+
+Stated precisely, under the failure model actually tested — the leader process is killed;
+Redis and the follower survive:
+
+| Property | |
+|---|---|
+| Committed messages survive leader failure | **Yes** — ACK follows replication; only offsets ≤ HWM are readable |
+| Single leader at a time | **Yes**, given a reachable Redis (`SET NX`) |
+| Ordering | **Yes** for a single producer connection; not across concurrent producers |
+| Delivery semantics | **At-least-once** (not exactly-once) |
+| Durability across broker restart | **No** — the log is in memory only |
+| Replication continues after failover | **No** — the promoted follower runs unreplicated |
+| Redis failure tolerance | **No** — Redis is a single point of failure |
+| Partitions / consumer groups | **Not implemented** |
+
+This is a from-scratch implementation of Kafka's *mechanisms*, not a Kafka replacement.
+See [Limitations](#limitations).
+
+---
+
+## Tech stack
+
+**Python 3.8+** · **Redis** (coordination) · **PySpark 3.5** (batch analytics) ·
+raw **TCP sockets** with a length-prefixed JSON protocol · `threading` for concurrency.
+
+Runtime dependency for the broker itself is just `redis`. Spark, pandas and numpy are
+only needed for the analytics job.
+
+---
+
+## Quick start
+
+Single machine, four terminals. Start the follower **before** the leader.
 
 ```bash
-# Clone repository
-git clone <your-repo-url>
-cd airline-kafka-pipeline
-
-# Install dependencies
 pip install -r requirements.txt
 ```
 
-### Start the System
-
-1. **Start Redis** (Node 2):
-   ```bash
-   redis-server
-   ```
-
-2. **Start Leader Broker** (Node 1):
-   ```bash
-   python -m leader_broker.leader \
-       --host 0.0.0.0 \
-       --port 9092 \
-       --follower-host <FOLLOWER_IP> \
-       --follower-port 9093 \
-       --redis-host <REDIS_IP>
-   ```
-
-3. **Start Follower Broker** (Node 2):
-   ```bash
-   python -m follower_broker.follower \
-       --host 0.0.0.0 \
-       --port 9093 \
-       --redis-host localhost
-   ```
-
-4. **Stream Flight Data** (Node 3):
-   ```bash
-   # Stream 1000 flight records
-   python -m producer.flight_data_producer \
-       --csv data/FlightDelay2.csv \
-       --brokers <LEADER_IP>:9092 <FOLLOWER_IP>:9093 \
-       --redis-host <REDIS_IP> \
-       --max-records 1000 \
-       --fast
-   ```
-
-5. **Run Analytics** (Node 4):
-   ```bash
-   # Real-time flight delay analytics
-   python -m consumer.flight_data_consumer \
-       --brokers <LEADER_IP>:9092 <FOLLOWER_IP>:9093 \
-       --redis-host <REDIS_IP> \
-       --batch
-   ```
-
-6. **Spark Processing** (Optional):
-   ```bash
-   # Advanced Spark analytics
-   python -m spark_jobs.flight_delay_streaming \
-       --brokers <LEADER_IP>:9092 <FOLLOWER_IP>:9093 \
-       --redis-host <REDIS_IP> \
-       --save
-   ```
-
-## 📚 Documentation
-
-- **[FLIGHT_DATA_GUIDE.md](FLIGHT_DATA_GUIDE.md)** - 🆕 Complete guide for flight data processing
-- **[SETUP.md](SETUP.md)** - Complete setup guide for 4-node deployment
-- **[DEMO.md](DEMO.md)** - Step-by-step failover demonstration
-- **[TEAM_GUIDE.md](TEAM_GUIDE.md)** - Individual team member guides
-- **[QUICK_START.md](QUICK_START.md)** - 5-minute quick start
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - Detailed architecture documentation
-- **[config.env.example](config.env.example)** - Configuration template
-
-## 🏗️ Project Structure
-
-```
-airline-kafka-pipeline/
-├── data/                           # Flight data
-│   └── FlightDelay2.csv           # 🆕 18,339 flight records
-├── common/                         # Shared utilities
-│   ├── protocol.py                # Message protocol
-│   ├── redis_client.py            # Redis wrapper
-│   └── config.py                  # Configuration
-├── leader_broker/                 # Leader broker (Person 1)
-│   ├── leader.py
-│   ├── log_manager.py
-│   └── replication.py
-├── follower_broker/               # Follower broker (Person 2)
-│   ├── follower.py
-│   ├── election.py
-│   └── log_manager.py
-├── producer/                      # Producer client (Person 3)
-│   ├── producer.py                # Basic producer
-│   └── flight_data_producer.py   # 🆕 Flight data streamer
-├── consumer/                      # Consumer client (Person 4)
-│   ├── consumer.py                # Basic consumer
-│   └── flight_data_consumer.py   # 🆕 Flight analytics
-├── spark_jobs/                    # 🆕 Spark processing
-│   └── flight_delay_streaming.py # Spark analytics
-├── scripts/                       # Startup scripts
-│   ├── start_leader.sh/bat
-│   ├── start_follower.sh/bat
-│   ├── start_flight_producer.sh/bat    # 🆕 Flight producer
-│   ├── start_flight_consumer.sh/bat    # 🆕 Flight consumer
-│   ├── start_spark_analytics.sh/bat    # 🆕 Spark job
-│   ├── demo_complete_pipeline.sh       # 🆕 Full demo
-│   └── test_integration.py
-├── output/                        # 🆕 Spark output
-│   └── flight_analysis/           # Analytics results
-├── requirements.txt               # Dependencies (+ Spark)
-├── config.env.example
-├── FLIGHT_DATA_GUIDE.md          # 🆕 Flight data guide
-├── SETUP.md
-├── DEMO.md
-└── README.md
-```
-
-## 👥 Team Roles
-
-### Person 1: Leader Broker (Node 1)
-**Responsibilities:**
-- Accepts all write requests from producers
-- Synchronously replicates to follower
-- Manages leader lease in Redis
-- Updates High Water Mark (HWM)
-
-**Files to Focus On:**
-- [leader_broker/leader.py](leader_broker/leader.py)
-- [leader_broker/replication.py](leader_broker/replication.py)
-- [leader_broker/log_manager.py](leader_broker/log_manager.py)
-
-**Startup:**
 ```bash
-bash scripts/start_leader.sh
-# or
-scripts\start_leader.bat
-```
-
----
-
-### Person 2: Follower Broker (Node 2)
-**Responsibilities:**
-- Receives replicated data from leader
-- Monitors leader health via heartbeat
-- Performs leader election on failure
-- Promotes to leader when needed
-- Hosts Redis metadata store
-
-**Files to Focus On:**
-- [follower_broker/follower.py](follower_broker/follower.py)
-- [follower_broker/election.py](follower_broker/election.py)
-- [follower_broker/log_manager.py](follower_broker/log_manager.py)
-
-**Startup:**
-```bash
-# Start Redis first
+# 1 — Redis
 redis-server
-
-# Then start follower
-bash scripts/start_follower.sh
-# or
-scripts\start_follower.bat
 ```
+
+```bash
+# 2 — Follower
+python -m follower_broker.follower --host 0.0.0.0 --port 9093 --redis-host localhost
+```
+
+```bash
+# 3 — Leader
+python -m leader_broker.leader --host 0.0.0.0 --port 9092 \
+    --follower-host localhost --follower-port 9093 --redis-host localhost
+```
+
+```bash
+# 4 — Produce, then consume
+python -m producer.producer --brokers localhost:9092 localhost:9093 \
+    --redis-host localhost --batch 100
+
+python -m consumer.consumer --consumer-id demo --brokers localhost:9092 localhost:9093 \
+    --redis-host localhost --from-beginning --fetch-all
+```
+
+Stream the flight dataset instead:
+
+```bash
+python -m producer.flight_data_producer --csv data/FlightDelay2.csv \
+    --brokers localhost:9092 localhost:9093 --redis-host localhost \
+    --max-records 1000 --fast
+
+python -m consumer.flight_data_consumer --consumer-id analytics \
+    --brokers localhost:9092 localhost:9093 --redis-host localhost --batch
+```
+
+**[→ Full setup, including the four-machine deployment](docs/SETUP.md)**
 
 ---
 
-### Person 3: Producer Client (Node 3)
-**Responsibilities:**
-- Streams flight delay data from CSV
-- Sends messages to current leader
-- Discovers leader via Redis
-- Automatic failover on leader failure
-- Message deduplication with UUIDs
+## Demonstration
 
-**Files to Focus On:**
-- [producer/flight_data_producer.py](producer/flight_data_producer.py) - 🆕 Flight data streamer
-- [producer/producer.py](producer/producer.py) - Basic producer
+The failover demo, in one paragraph: produce 100 messages and confirm `hwm:offset` is
+`99`. Kill the leader with `kill -9` so it never releases its lease. Watch the follower
+log three missed checks and then `LEADERSHIP ACQUIRED`. Run the *same* producer command
+again — it prints `Discovered leader: …:9093` and commits at offset 100, with nothing
+reconfigured. Then consume from the beginning and count: **101 messages**, all 100
+pre-crash ones served from what was the replica.
 
-**Startup:**
 ```bash
-# Flight data streaming
-bash scripts/start_flight_producer.sh
-# or
-scripts\start_flight_producer.bat
-
-# Basic producer
-bash scripts/start_producer.sh
+bash scripts/demo_failover.sh            # test messages
+bash scripts/demo_complete_pipeline.sh   # flight data + Spark
 ```
 
-**Usage:**
-```bash
-# Stream flight data (1000 records, fast mode)
-python -m producer.flight_data_producer \
-    --csv data/FlightDelay2.csv \
-    --brokers <BROKERS> \
-    --max-records 1000 \
-    --fast
+Both scripts pause for you to kill the leader by hand.
 
-# Stream all 18K records with delay (simulates real-time)
-python -m producer.flight_data_producer \
-    --csv data/FlightDelay2.csv \
-    --brokers <BROKERS> \
-    --delay 100
-```
+**[→ Step-by-step demo guide, with expected output](docs/DEMO.md)**
 
 ---
 
-### Person 4: Consumer Client (Node 4)
-**Responsibilities:**
-- Reads flight data from current leader
-- Performs real-time analytics on flight delays
-- Respects High Water Mark (HWM)
-- Tracks and commits offsets to Redis
-- Automatic failover on leader failure
+## Flight data pipeline
 
-**Files to Focus On:**
-- [consumer/flight_data_consumer.py](consumer/flight_data_consumer.py) - 🆕 Flight analytics
-- [consumer/consumer.py](consumer/consumer.py) - Basic consumer
+`data/FlightDelay2.csv` — 18,338 US Bureau of Transportation Statistics flight records:
+10 carriers, 335 origin airports, 5,013 distinct routes, delays from 0 to 1,403 minutes.
 
-**Startup:**
-```bash
-# Flight data analytics
-bash scripts/start_flight_consumer.sh
-# or
-scripts\start_flight_consumer.bat
+Each row is streamed as one message through the full replicated path, then analyzed two
+ways: an in-process consumer computing delay rates, carrier and route rankings; and a
+Spark job adding hourly delay profiles and distance-bucket comparisons, writing
+Parquet/JSON/CSV.
 
-# Basic consumer
-bash scripts/start_consumer.sh
-```
+The dataset is what makes the failover demo checkable — stream 1000, kill the leader,
+stream 100 more, and confirm 1,100 records are readable afterwards.
 
-**Usage:**
-```bash
-# Batch analytics - fetch all and analyze
-python -m consumer.flight_data_consumer \
-    --brokers <BROKERS> \
-    --batch
-
-# Continuous mode - real-time analytics
-python -m consumer.flight_data_consumer \
-    --brokers <BROKERS> \
-    --continuous
-```
-
-**Analytics Output:**
-- Overall delay statistics
-- Top airlines by flight count
-- Airlines with worst delays
-- Busiest routes
-- Routes with highest delays
-- Delay patterns by time of day
+**[→ Dataset, schema, pipeline, and analytics caveats](docs/FLIGHT_DATA.md)**
 
 ---
 
-## 🆕 Spark Analytics (Bonus Component)
+## Testing
 
-**File:** [spark_jobs/flight_delay_streaming.py](spark_jobs/flight_delay_streaming.py)
+Integration tests run against a live cluster (`python scripts/test_integration.py`):
+end-to-end produce/consume with content verification, sustained batch production,
+consumer offset durability across process restart, and HWM readability.
 
-**What it does:**
-- Connects to YAK broker as a consumer
-- Fetches all flight data into Spark DataFrame
-- Performs distributed big data analytics
-- Saves results to disk (Parquet, JSON, CSV)
+Failover itself is verified manually, following the demo guide — there is no automated
+test for it.
 
-**Advanced Analytics:**
-- Statistical analysis (mean, max, percentiles)
-- Delay patterns by time of day
-- Distance vs delay correlation
-- Route performance analysis
-- Airline comparison
-
-**Usage:**
-```bash
-# Run Spark analytics with output
-python -m spark_jobs.flight_delay_streaming \
-    --brokers <BROKERS> \
-    --save \
-    --output output/flight_analysis
-
-# Use startup script
-bash scripts/start_spark_analytics.sh
-```
-
-**Output Files:**
-- `output/flight_analysis/parquet/` - Columnar format for further processing
-- `output/flight_analysis/json/` - Human-readable JSON
-- `output/flight_analysis/summary_csv/` - Summary statistics
+**[→ What each test covers, and what isn't covered](docs/TESTING.md)**
 
 ---
 
-## 🔑 Key Features
+## Team
 
-### 1. Real Flight Data Processing
-- 18,339 authentic airline flight records
-- Departure and arrival delay data
-- Multiple airlines, routes, and airports
-- Distance and flight time information
+Built for **Big Data (UE23CS343AB2)**, PES University, 2025. The system ran distributed
+across four machines, one node per member.
 
-### 2. Synchronous Replication
-- Leader waits for follower ACK before acknowledging producer
-- Guarantees durability of committed messages
-- No data loss on leader failure
+| Member | GitHub | Node |
+|---|---|---|
+| Aditya Sharma | [@Sharma-Aditya7](https://github.com/Sharma-Aditya7) | Leader broker |
+| Laxman Srivastava | [@laxmanclo](https://github.com/laxmanclo) | Follower broker + Redis |
+| Devyani | [@devyani648](https://github.com/devyani648) | Consumer |
+| Rishika | [@rishika207](https://github.com/rishika207) | Producer |
 
-### 3. Leader Election
-- Uses Redis SETNX for atomic leader election
-- Heartbeat-based failure detection (15-second timeout)
-- Prevents split-brain scenarios
-
-### 4. High Water Mark (HWM)
-- Tracks highest replicated offset
-- Consumers can only read committed data
-- Ensures read-after-write consistency
-
-### 5. Client Failover
-- Automatic leader discovery via Redis
-- Retry logic with exponential backoff
-- Transparent reconnection on failure
-
-### 6. Real-Time Analytics
-- Live delay statistics
-- Route and airline analysis
-- Time-based patterns
-- Performance metrics
-
-### 7. Spark Integration
-- Distributed big data processing
-- Advanced analytics
-- Multiple output formats
-- Scalable processing
-
-## 🧪 Testing
-
-### Run Integration Tests
-```bash
-python scripts/test_integration.py
-```
-
-Tests include:
-- ✅ Basic produce and consume
-- ✅ Batch message production
-- ✅ Consumer offset tracking
-- ✅ High Water Mark enforcement
-
-### Run Flight Data Demo
-```bash
-bash scripts/demo_complete_pipeline.sh
-```
-
-Demonstrates:
-1. Stream 1000 flight records to leader
-2. Perform real-time analytics
-3. Kill leader broker
-4. Follower auto-promotes to leader
-5. Send 100 more flight records to new leader
-6. Verify zero data loss (all 1100 records present)
-7. Run Spark analytics (optional)
-
-### Run Basic Failover Demo
-```bash
-bash scripts/demo_failover.sh
-```
-
-Basic demo:
-1. Send 100 test messages
-2. Kill leader
-3. Follower auto-promotes
-4. Consumer reads all 100 messages (zero data loss!)
-
-## 📊 Performance
-
-| Metric | Value |
-|--------|-------|
-| Flight Record Streaming (Fast) | ~500-1000 rec/sec |
-| Flight Record Streaming (Real-time) | ~10 rec/sec |
-| Replication Latency | ~10-50ms |
-| Failover Time | ~15-20 seconds |
-| Data Loss on Failure | **0%** |
-| Spark Processing (18K records) | ~10-30 seconds |
-| Consumer Analytics (1K records) | ~1-2 seconds |
-
-## 🛠️ Configuration
-
-Edit `config.env` to customize:
-
-```bash
-# Broker addresses
-LEADER_HOST=192.168.1.101
-LEADER_PORT=9092
-FOLLOWER_HOST=192.168.1.102
-FOLLOWER_PORT=9093
-
-# Redis
-REDIS_HOST=192.168.1.102
-REDIS_PORT=6379
-
-# Timeouts
-LEADER_LEASE_TTL=30        # Lease validity (seconds)
-HEARTBEAT_INTERVAL=5       # Heartbeat frequency (seconds)
-HEARTBEAT_TIMEOUT=15       # Failure detection time (seconds)
-```
-
-## 🐛 Troubleshooting
-
-### Connection Issues
-```bash
-# Test Redis connectivity
-redis-cli -h <REDIS_IP> ping
-
-# Test broker connectivity
-telnet <BROKER_IP> 9092
-```
-
-### Clear Redis State
-```bash
-redis-cli -h <REDIS_IP> FLUSHALL
-```
-
-### View Logs
-All components print detailed logs to stdout. Check for:
-- `✓` - Success messages
-- `⚠` - Warnings
-- `✗` - Errors
-
-## 📖 Learning Outcomes
-
-By building this project, you'll learn:
-
-1. **Distributed Consensus**: Leader election using atomic operations
-2. **Replication Protocols**: Synchronous replication for durability
-3. **Fault Tolerance**: Automatic failover and recovery
-4. **Network Programming**: TCP socket programming in Python
-5. **Client Design**: Smart clients with retry and failover logic
-6. **Metadata Management**: Using Redis as a coordination service
-
-## 🎓 Academic Context
-
-This project is part of **Big Data 2025 (UE23CS343AB2)** course at PES University.
-
-**Project:** YAK - Yet Another Kafka
-**Team Size:** 4 members
-**Evaluation:**
-- Individual Component: 10 marks
-- Viva: 15 marks
-- End-to-End Pipeline: 5 marks
-
-## 📝 License
-
-This is an academic project for educational purposes.
-
-## 🙏 Acknowledgments
-
-Inspired by Apache Kafka's architecture and design principles.
+See **[docs/CONTRIBUTIONS.md](docs/CONTRIBUTIONS.md)**.
 
 ---
 
-## 🚀 Ready to Get Started?
+## Limitations
 
-### For Flight Data Pipeline:
-1. Read [FLIGHT_DATA_GUIDE.md](FLIGHT_DATA_GUIDE.md) for complete flight data guide
-2. Install dependencies: `pip install -r requirements.txt`
-3. Start brokers (Leader + Follower)
-4. Stream flight data: `bash scripts/start_flight_producer.sh`
-5. Run analytics: `bash scripts/start_flight_consumer.sh`
-6. Run Spark processing: `bash scripts/start_spark_analytics.sh`
-7. Test failover: `bash scripts/demo_complete_pipeline.sh`
+Stated plainly, because the interesting part of this project is knowing where the edges
+are:
 
-### For Basic Setup:
-1. Read [SETUP.md](SETUP.md) for installation instructions
-2. Read [QUICK_START.md](QUICK_START.md) for 5-minute guide
-3. Configure your 4 nodes with actual IP addresses
-4. Start all components in order
-5. Run the demo from [DEMO.md](DEMO.md)
-
----
-
-## 📈 What Makes This Project Special?
-
-1. **Real-World Data** - Not toy examples, actual 18K flight delay records
-2. **Production Concepts** - Implements real Kafka-like distributed systems patterns
-3. **Zero Data Loss** - Properly implemented synchronous replication
-4. **Automatic Failover** - Self-healing system with leader election
-5. **Analytics Pipeline** - Complete end-to-end data processing
-6. **Spark Integration** - Big data processing capabilities
-7. **Fault Tolerant** - Survives catastrophic failures
-8. **Well Documented** - Comprehensive guides and examples
+- **No disk persistence.** Both logs are in-memory Python lists. A restarted broker comes
+  back empty; stopping both brokers loses everything regardless of the HWM.
+- **The promoted follower runs unreplicated.** It has no follower of its own and does not
+  replicate writes it accepts after promotion. The cluster survives one failure, not two.
+- **No rejoin path.** A restarted leader finds the lease held, prints
+  `Cannot start as leader`, and exits. There is no catch-up or demotion.
+- **Redis is a single point of failure.** No election, discovery, or offset commit is
+  possible without it.
+- **No partitions, no consumer groups, one topic.** No horizontal scaling.
+- **Ordering holds for a single producer connection only** — append and replicate are not
+  performed under one lock, so concurrent producers can interleave. Details in
+  [ARCHITECTURE.md](docs/ARCHITECTURE.md#ordering-caveat).
+- **No batching or pipelining.** One message per replication round trip bounds throughput
+  to the low hundreds per second on a LAN. No benchmark figures are published here
+  because none were recorded; the producer prints its own measured rate if you want a
+  number for your setup.
+- **No authentication, authorization, or TLS.** Plain TCP. Do not expose these ports
+  outside a trusted network.
+- **Client retry budget is short** — 3 attempts, 2s apart, against a 15–20s failover
+  window. A producer caught mid-failover reports failure and recovers on re-invocation.
 
 ---
 
-## 🎓 What You'll Learn
+## Documentation
 
-- **Distributed Systems**: Leader election, consensus, replication
-- **Stream Processing**: Real-time data pipelines
-- **Big Data**: Spark analytics on large datasets
-- **Fault Tolerance**: Designing for failure
-- **Network Programming**: TCP/IP, sockets, protocols
-- **Data Analytics**: Flight delay patterns and insights
-
----
-
-## 📊 Sample Analytics Output
-
-```
-======================================================================
-FLIGHT DELAY ANALYTICS
-======================================================================
-
-📊 Overall Statistics:
-  Total Flights Processed: 18,339
-  Delayed Flights: 4,231
-  On-Time Flights: 14,108
-  Delay Rate: 23.07%
-  Total Delay Minutes: 103,456
-  Average Delay: 24.46 minutes
-
-✈️  Top Airlines by Flight Count:
-  UA: 15,234 flights (83.1%)
-  DL: 1,876 flights (10.2%)
-  AA: 1,229 flights (6.7%)
-
-⏰ Airlines with Highest Average Delays:
-  UA: 24.56 min avg (3,421 delayed flights)
-  DL: 18.32 min avg (543 delayed flights)
-  AA: 22.14 min avg (267 delayed flights)
-
-🛫 Top Routes:
-  IAH->DFW: 423 flights
-  DFW->IAH: 398 flights
-  IAH->AUS: 356 flights
-
-🛣️  Routes with Highest Average Delays:
-  ORF->IAD: 48.00 min avg
-  IAD->ORF: 28.00 min avg
-  IAH->MSY: 18.50 min avg
-```
+| | |
+|---|---|
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | Protocol, log, replication, election, guarantees, known gaps |
+| [SETUP.md](docs/SETUP.md) | Install, single-machine and four-machine deployment, troubleshooting |
+| [DEMO.md](docs/DEMO.md) | Failover walkthroughs with expected output |
+| [FLIGHT_DATA.md](docs/FLIGHT_DATA.md) | Dataset, streaming pipeline, Spark analytics |
+| [TESTING.md](docs/TESTING.md) | Test coverage and its gaps |
+| [CONTRIBUTIONS.md](docs/CONTRIBUTIONS.md) | Team and node roles |
 
 ---
 
-**Built with ❤️ by Team YAK**
+## License
 
-**Perfect for:**
-- Big Data course projects ✅
-- Distributed systems learning ✅
-- Real-world data analytics ✅
-- System design interviews ✅
-- Production-grade portfolio projects ✅
+Academic project, released for educational and portfolio purposes.
+
+Flight data derived from the US Bureau of Transportation Statistics on-time performance
+dataset (public domain). Architecture inspired by Apache Kafka.
